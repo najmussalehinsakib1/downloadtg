@@ -1,29 +1,46 @@
 """
 downloader.py — Media metadata extraction and downloading via yt-dlp.
-
-This module is intentionally free of Telegram-specific code so it can be
-tested and reused independently.
 """
 
 import os
 import uuid
 import logging
+import tempfile
 from typing import Any
 
 import yt_dlp  # type: ignore
 
 logger = logging.getLogger(__name__)
 
-# Directory where downloaded files are temporarily stored
 DOWNLOAD_DIR = os.path.join(os.path.dirname(__file__), "downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Maximum number of video-quality options shown to the user
 MAX_VIDEO_FORMATS = 6
 
 
+def _get_cookies_file() -> str | None:
+    """
+    Railway environment variable COOKIES_CONTENT থেকে
+    একটা temporary cookies.txt file বানিয়ে দেয়।
+    যদি variable না থাকে তাহলে None return করে।
+    """
+    cookies_content = os.getenv("COOKIES_CONTENT", "").strip()
+    if not cookies_content:
+        return None
+    try:
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding="utf-8"
+        )
+        tmp.write(cookies_content)
+        tmp.close()
+        logger.info("Cookies file created at: %s", tmp.name)
+        return tmp.name
+    except Exception as exc:
+        logger.warning("Could not write cookies file: %s", exc)
+        return None
+
+
 def _human_size(size_bytes: int | None) -> str:
-    """Convert bytes to a human-readable string (e.g. '45 MB')."""
     if not size_bytes:
         return "unknown size"
     for unit in ("B", "KB", "MB", "GB"):
@@ -33,22 +50,36 @@ def _human_size(size_bytes: int | None) -> str:
     return f"{size_bytes:.1f} TB"
 
 
-def extract_formats(url: str) -> list[dict[str, Any]]:
+def _base_ydl_opts() -> dict[str, Any]:
     """
-    Use yt-dlp to fetch all available formats for *url*.
-
-    Returns a list of dicts, each containing:
-        - label    : display text shown on the inline button
-        - callback : callback_data string ("dl|<format_id>|<url>")
-
-    Raises ValueError for unsupported / private URLs.
+    সব yt-dlp call এ common options।
+    Cookies থাকলে automatically add হয়।
     """
-    ydl_opts = {
+    opts: dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
-        "skip_download": True,   # metadata only
         "noplaylist": True,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            )
+        },
     }
+    cookie_file = _get_cookies_file()
+    if cookie_file:
+        opts["cookiefile"] = cookie_file
+    return opts
+
+
+def extract_formats(url: str) -> list[dict[str, Any]]:
+    """
+    yt-dlp দিয়ে URL এর available formats বের করে।
+    Returns list of dicts: label, format_id, audio_only
+    """
+    ydl_opts = _base_ydl_opts()
+    ydl_opts["skip_download"] = True
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
@@ -61,11 +92,9 @@ def extract_formats(url: str) -> list[dict[str, Any]]:
 
     raw_formats: list[dict] = info.get("formats", [])
 
-    # ── Collect unique video qualities ─────────────────────────────────────────
     seen_heights: set[int] = set()
     video_options: list[dict[str, Any]] = []
 
-    # Sort by height descending so we offer best quality first
     sorted_formats = sorted(
         raw_formats,
         key=lambda f: (f.get("height") or 0),
@@ -77,83 +106,63 @@ def extract_formats(url: str) -> list[dict[str, Any]]:
         vcodec = fmt.get("vcodec", "none")
         ext = fmt.get("ext", "mp4")
 
-        # Skip audio-only streams for this section
         if not height or vcodec == "none":
             continue
-
         if height in seen_heights:
             continue
         seen_heights.add(height)
 
-        # Prefer combined streams; fall back to video+audio merge
         size_bytes = fmt.get("filesize") or fmt.get("filesize_approx")
-        size_label = _human_size(size_bytes)
-
-        # Use a format selector that merges best audio into this resolution
         format_selector = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]"
 
-        label = f"📹 {height}p  ({size_label})  .{ext}"
-        callback = f"dl|{format_selector}|{url}"
-
-        video_options.append({"label": label, "callback": callback})
+        video_options.append({
+            "label": f"📹 {height}p  ({_human_size(size_bytes)})  .{ext}",
+            "format_id": format_selector,
+            "audio_only": False,
+        })
 
         if len(video_options) >= MAX_VIDEO_FORMATS:
             break
 
-    # ── Audio-only option ──────────────────────────────────────────────────────
+    # Audio-only option
     audio_formats = [
         f for f in raw_formats
         if f.get("acodec") != "none" and f.get("vcodec") == "none"
     ]
     if audio_formats:
-        # Pick the highest-bitrate audio stream for size estimate
-        best_audio = max(
-            audio_formats,
-            key=lambda f: f.get("abr") or f.get("tbr") or 0,
-        )
+        best_audio = max(audio_formats, key=lambda f: f.get("abr") or f.get("tbr") or 0)
         size_bytes = best_audio.get("filesize") or best_audio.get("filesize_approx")
-        label = f"🎵 Audio Only  ({_human_size(size_bytes)})  .mp3"
-        video_options.append({"label": label, "callback": f"dl|bestaudio/best|{url}::audio"})
+        video_options.append({
+            "label": f"🎵 Audio Only  ({_human_size(size_bytes)})  .mp3",
+            "format_id": "bestaudio/best",
+            "audio_only": True,
+        })
 
     if not video_options:
-        # Last resort: offer generic "best" option
         video_options.append({
             "label": "⬇️ Best Available Quality",
-            "callback": f"dl|best|{url}",
+            "format_id": "best",
+            "audio_only": False,
         })
 
     return video_options
 
 
-def download_media(url: str, format_id: str) -> tuple[str, int]:
+def download_media(url: str, format_id: str, audio_only: bool = False) -> tuple[str, int]:
     """
-    Download *url* using *format_id* (a yt-dlp format selector string).
-
-    Returns:
-        (file_path, file_size_in_bytes)
-
-    Raises:
-        FileNotFoundError if the downloaded file cannot be located.
+    yt-dlp দিয়ে media download করে।
+    Returns: (file_path, file_size_in_bytes)
     """
-    # Detect audio-only flag embedded at the end of the URL
-    audio_only = url.endswith("::audio")
-    if audio_only:
-        url = url[: -len("::audio")]
-
-    # Unique output template to avoid filename collisions
     unique_id = uuid.uuid4().hex
     output_template = os.path.join(DOWNLOAD_DIR, f"{unique_id}.%(ext)s")
 
-    ydl_opts: dict[str, Any] = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
+    ydl_opts = _base_ydl_opts()
+    ydl_opts.update({
         "outtmpl": output_template,
-        "merge_output_format": "mp4",  # ensure merged output is mp4
-    }
+        "merge_output_format": "mp4",
+    })
 
     if audio_only:
-        # Convert to MP3
         ydl_opts["format"] = "bestaudio/best"
         ydl_opts["postprocessors"] = [
             {
@@ -165,7 +174,7 @@ def download_media(url: str, format_id: str) -> tuple[str, int]:
     else:
         ydl_opts["format"] = format_id
 
-    logger.info("Starting download | url=%s | format=%s", url, format_id)
+    logger.info("Downloading | url=%s | format=%s | audio_only=%s", url, format_id, audio_only)
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
@@ -173,8 +182,6 @@ def download_media(url: str, format_id: str) -> tuple[str, int]:
         except yt_dlp.utils.DownloadError as exc:
             raise FileNotFoundError(f"yt-dlp download failed: {exc}") from exc
 
-    # ── Locate the output file ─────────────────────────────────────────────────
-    # yt-dlp may change the extension, so we search by UUID prefix
     matched: list[str] = [
         os.path.join(DOWNLOAD_DIR, f)
         for f in os.listdir(DOWNLOAD_DIR)
@@ -182,12 +189,10 @@ def download_media(url: str, format_id: str) -> tuple[str, int]:
     ]
 
     if not matched:
-        raise FileNotFoundError(
-            "Download appeared to succeed but the output file was not found."
-        )
+        raise FileNotFoundError("Download file not found after completion.")
 
     file_path = matched[0]
     file_size = os.path.getsize(file_path)
-    logger.info("Download complete | path=%s | size=%d bytes", file_path, file_size)
+    logger.info("Done | path=%s | size=%d bytes", file_path, file_size)
 
     return file_path, file_size
