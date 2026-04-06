@@ -113,11 +113,10 @@ def extract_formats(url: str) -> list[dict[str, Any]]:
         seen_heights.add(height)
 
         size_bytes = fmt.get("filesize") or fmt.get("filesize_approx")
-        format_selector = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]"
 
         video_options.append({
             "label": f"📹 {height}p  ({_human_size(size_bytes)})  .{ext}",
-            "format_id": format_selector,
+            "format_id": str(height),   # FIX: store only height number, no special chars
             "audio_only": False,
         })
 
@@ -172,7 +171,15 @@ def download_media(url: str, format_id: str, audio_only: bool = False) -> tuple[
             }
         ]
     else:
-        ydl_opts["format"] = format_id
+        # format_id is stored as height string (e.g. "720")
+        # build actual yt-dlp selector here, not in callback_data
+        if format_id.isdigit():
+            ydl_opts["format"] = (
+                f"bestvideo[height<={format_id}]+bestaudio"
+                f"/best[height<={format_id}]"
+            )
+        else:
+            ydl_opts["format"] = format_id  # fallback e.g. "best"
 
     logger.info("Downloading | url=%s | format=%s | audio_only=%s", url, format_id, audio_only)
 
