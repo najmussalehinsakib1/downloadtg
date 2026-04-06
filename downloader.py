@@ -80,6 +80,7 @@ def extract_formats(url: str) -> list[dict[str, Any]]:
     """
     ydl_opts = _base_ydl_opts()
     ydl_opts["skip_download"] = True
+    ydl_opts["format"] = None  # Don't validate/select any format during info extraction
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:

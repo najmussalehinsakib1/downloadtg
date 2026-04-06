@@ -74,7 +74,9 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         loop = asyncio.get_running_loop()
         formats = await loop.run_in_executor(None, extract_formats, url)
     except ValueError as exc:
-        await status_msg.edit_text(f"❌ *Error:* {exc}", parse_mode="Markdown")
+        # Escape special Markdown chars to avoid Telegram parse error
+        safe_msg = str(exc).replace("_", r"\_").replace("*", r"\*").replace("`", r"\`").replace("[", r"\[")
+        await status_msg.edit_text(f"❌ *Error:* {safe_msg}", parse_mode="Markdown")
         return
     except Exception as exc:
         logger.exception("Unexpected error during format extraction")
