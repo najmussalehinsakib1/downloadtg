@@ -19,11 +19,6 @@ MAX_VIDEO_FORMATS = 6
 
 
 def _get_cookies_file() -> str | None:
-    """
-    Railway environment variable COOKIES_CONTENT থেকে
-    একটা temporary cookies.txt file বানিয়ে দেয়।
-    যদি variable না থাকে তাহলে None return করে।
-    """
     cookies_content = os.getenv("COOKIES_CONTENT", "").strip()
     if not cookies_content:
         return None
@@ -51,10 +46,6 @@ def _human_size(size_bytes: int | None) -> str:
 
 
 def _base_ydl_opts() -> dict[str, Any]:
-    """
-    সব yt-dlp call এ common options।
-    Cookies থাকলে automatically add হয়।
-    """
     opts: dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
@@ -75,16 +66,15 @@ def _base_ydl_opts() -> dict[str, Any]:
 
 def extract_formats(url: str) -> list[dict[str, Any]]:
     """
-    yt-dlp দিয়ে URL এর available formats বের করে।
-    Returns list of dicts: label, format_id, audio_only
+    process=False দিলে yt-dlp কোনো format validate/select করে না,
+    শুধু raw metadata return করে।
+    এতে 'Requested format is not available' error আসে না।
     """
     ydl_opts = _base_ydl_opts()
-    ydl_opts["skip_download"] = True
-    ydl_opts["format"] = None  # Don't validate/select any format during info extraction
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
-            info = ydl.extract_info(url, download=False)
+            info = ydl.extract_info(url, download=False, process=False)
         except yt_dlp.utils.DownloadError as exc:
             raise ValueError(str(exc)) from exc
 
@@ -117,14 +107,13 @@ def extract_formats(url: str) -> list[dict[str, Any]]:
 
         video_options.append({
             "label": f"📹 {height}p  ({_human_size(size_bytes)})  .{ext}",
-            "format_id": str(height),   # FIX: store only height number, no special chars
+            "format_id": str(height),
             "audio_only": False,
         })
 
         if len(video_options) >= MAX_VIDEO_FORMATS:
             break
 
-    # Audio-only option
     audio_formats = [
         f for f in raw_formats
         if f.get("acodec") != "none" and f.get("vcodec") == "none"
@@ -149,10 +138,6 @@ def extract_formats(url: str) -> list[dict[str, Any]]:
 
 
 def download_media(url: str, format_id: str, audio_only: bool = False) -> tuple[str, int]:
-    """
-    yt-dlp দিয়ে media download করে।
-    Returns: (file_path, file_size_in_bytes)
-    """
     unique_id = uuid.uuid4().hex
     output_template = os.path.join(DOWNLOAD_DIR, f"{unique_id}.%(ext)s")
 
@@ -172,15 +157,13 @@ def download_media(url: str, format_id: str, audio_only: bool = False) -> tuple[
             }
         ]
     else:
-        # format_id is stored as height string (e.g. "720")
-        # build actual yt-dlp selector here, not in callback_data
         if format_id.isdigit():
             ydl_opts["format"] = (
                 f"bestvideo[height<={format_id}]+bestaudio"
                 f"/best[height<={format_id}]"
             )
         else:
-            ydl_opts["format"] = format_id  # fallback e.g. "best"
+            ydl_opts["format"] = format_id
 
     logger.info("Downloading | url=%s | format=%s | audio_only=%s", url, format_id, audio_only)
 
